@@ -28,7 +28,7 @@ survey <- read_excel('../data/Butterfly_mwamba_survey.xlsx', sheet=1,
     start_time = as.POSIXct(paste(date, format(start_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
     end_time = as.POSIXct(paste(date, format(end_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
     duration = difftime(end_time,start_time,units ="mins"),
-    weather=str_split(weather,","),
+    weather_l=str_split(weather,","),
     survey_id = paste(format(date),format(start_time,'%H%M'),sep="_"),
     abandoned = ifelse(is.na(abandoned),F,abandoned)
     ) %>% 
@@ -46,9 +46,10 @@ paste0("Earliest date: ", min(survey$date))
 paste0("Latest date: ", max(survey$date))
 paste0("Unique start date: ", paste(sort(unique(format(survey$start_time,"%H:%M"))), collapse = ', '))
 "Following list need to be empty: "
+survey %>% group_by(survey_id) %>% filter(n_distinct(date)>1) %>% .$survey_id %>% unique()
 survey %>% group_by(survey_id) %>% filter(n_distinct(start_time)>1) %>% .$survey_id %>% unique()
 survey %>% group_by(survey_id) %>% filter(n_distinct(end_time)>1) %>% .$survey_id %>% unique()
-survey %>% group_by(survey_id) %>% filter(n_distinct(weather)>1) %>% .$survey_id %>% unique()
+survey %>% group_by(survey_id) %>% filter(n_distinct(weather_l)>1) %>% .$survey_id %>% unique()
 survey %>% group_by(survey_id) %>% filter(n_distinct(duration)>1) %>% .$survey_id %>% unique()
 survey %>% group_by(survey_id) %>% filter(n_distinct(name)<3) %>% .$survey_id %>% unique()
 survey %>% filter(duration<15) %>% .$survey_id %>% unique()
@@ -76,7 +77,7 @@ species.list %>% datatable()
 ## Add weather variable
 
 ```{r}
-unique(unlist(survey$weather))
+unique(unlist(survey$weather_l))
 ```
 
 ```{r, eval=F}
@@ -126,13 +127,13 @@ data.frame(
 ```{r}
 survey_evt <- survey %>% 
   group_by(survey_id) %>% 
-  summarise(date=first(date),
+  summarise(date = first(date),
             start_time = first(start_time),
             end_time = first(end_time),
             weather = first(weather), 
             #note = paste(first(abandoned), first(ill), first(nature_tail_only)),
-            .groups="drop",
-  )
+            .groups = "drop"
+  ) 
 
 era5 <- read_csv("../data/ERA5.csv")
 
