@@ -1,0 +1,178 @@
+---
+title: "Untitled"
+author: "Raphaël Nussbaumer"
+date: "3/5/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(plotly)
+library(readxl)
+library(DT)
+```
+
+
+## Load data
+
+Load the raw data from the `.xlsx` file and perform the following pre-processing steps. 
+- set time zone.
+- compute survey duration
+- eliminates surveys which were abandoned or with uncertain validity.
+
+```{r}
+species.list <- read_excel('../data/Butterfly_mwamba_survey.xlsx', sheet=2)
+
+survey <- read_excel('../data/Butterfly_mwamba_survey.xlsx', sheet=1, 
+                     col_types = c("date","text", "numeric", "date", "date", "text", "guess","guess","guess","guess", "text", "skip", "skip")) %>%
+  mutate(
+    date = as.POSIXct(format(date), tz="africa"),
+    start_time = as.POSIXct(paste(date, format(start_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
+    end_time = as.POSIXct(paste(date, format(end_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
+    duration = difftime(end_time,start_time,units ="mins"),
+    weather=str_split(weather,","),
+    survey_id = paste(format(date),format(start_time,'%H%M'),sep="_"),
+    abandoned = ifelse(is.na(abandoned),F,abandoned)
+    ) %>% 
+  filter(!(valid %in% c('error','unsure'))) %>% 
+  filter(!abandoned) %>% 
+  select(-c('valid','abandoned')) %>% 
+  left_join(species.list, by="name")
+```
+
+## Add weather from ERA5 data
+
+```{r}
+era5 <- read_csv("../data/ERA5.csv",show_col_types = FALSE)
+
+survey <- survey %>% mutate(
+  u10 = (approx(era5$time, era5$u10, xout = start_time)[[2]] + approx(era5$time, era5$u10, end_time)[[2]]) / 2,
+  v10 = (approx(era5$time, era5$v10, xout = start_time)[[2]] + approx(era5$time, era5$v10, end_time)[[2]]) / 2,
+  sp = (approx(era5$time, era5$sp, xout = start_time)[[2]] + approx(era5$time, era5$sp, end_time)[[2]]) / 2,
+  tcc = (approx(era5$time, era5$tcc, xout = start_time)[[2]] + approx(era5$time, era5$tcc, end_time)[[2]]) / 2,
+  tp = (approx(era5$time, era5$tp, xout = start_time)[[2]] + approx(era5$time, era5$tp, end_time)[[2]]) / 2,
+  t2m = (approx(era5$time, era5$t2m, xout = start_time)[[2]] + approx(era5$time, era5$t2m, end_time)[[2]]) / 2,
+  ssr = (approx(era5$time, era5$ssr, xout = start_time)[[2]] + approx(era5$time, era5$ssr, end_time)[[2]]) / 2,
+)
+```
+
+## Survey level
+
+```{r}
+survey_day <- survey %>% 
+  group_by(date) %>% 
+  summarise(
+    survey_per_day = n_distinct(survey_id),
+    record_per_day = n()
+  )
+
+ggplotly(ggplot(survey_day) + geom_col(aes(x=date,y=survey_per_day)))
+ggplotly(ggplot(survey_day) + geom_col(aes(x=date,y=record_per_day)))
+```
+
+```{r}
+survey_gr <- survey %>% 
+  group_by(survey_id) %>% 
+  summarise(
+    date = first(date),
+    start_time = as.POSIXct(paste("2020-1-1", format(first(start_time),"%H:%M"))),
+    duration = first(duration),
+    nb_record = n(),
+    nb_species = n_distinct(name),
+    sum_count = sum(count)
+    )
+
+ggplotly(ggplot(survey_gr) + geom_histogram(aes(x=start_time), binwidth = 60) + ylab("Number of surveys"))
+ggplotly(ggplot(survey_gr) + geom_histogram(aes(x=duration),binwidth = 1) + ylab("Number of surveys"))
+ggplotly(ggplot(survey_gr) + geom_histogram(aes(x=nb_species),binwidth = 1)+ ylab("Number of surveys"))
+ggplotly(ggplot(survey_gr) + geom_histogram(aes(x=nb_record),binwidth = 1)+ ylab("Number of surveys"))
+ggplotly(ggplot(survey_gr) + geom_histogram(aes(x=sum_count),binwidth = 1)+ ylab("Number of surveys"))
+```
+
+## Species level
+Choose a species
+```{r}
+survey_sp <- survey %>% 
+  group_by(name) %>% 
+  summarise(
+    Taxon = first(Taxon),
+    Family = first(Family),
+    Genus = first(Genus),
+    nb_record = n_distinct(survey_id),
+    sum_count = sum(count)
+  ) 
+
+ggplotly(ggplot(survey_sp) + geom_histogram(aes(x=nb_record),bins = 40) + ylab("Number of species"))
+
+ggplotly(ggplot(survey_sp) + geom_point(aes(x=nb_record,y=sum_count, label = name)) + scale_y_log10() + scale_x_log10())
+
+
+survey_sp %>% 
+  arrange(desc(nb_record)) %>% 
+  filter(nb_record>10) %>% 
+  datatable()
+```
+
+
+```{r}
+test_name = "Eronia cleodora"
+
+survey_sp1 <- survey %>% 
+  group_by(survey_id) %>% 
+  summarise(
+    name = paste0(name[grepl(test_name, name)],collapse="|"),
+    count_sp = sum(count[grepl(test_name, name)]),
+    date = first(date),
+    start_time = first(start_time),
+    duration = first(duration),
+    u10 = first(u10),
+    v10 = first(v10),
+    sp = first(sp),
+    tcc = first(tcc),
+    tp = first(tp),
+    t2m = first(t2m),
+    ssr = first(ssr),
+  ) %>% 
+  mutate(
+    doy = as.numeric(strftime(date, format = "%j")),
+    start_hour = as.numeric(format(start_time,'%H'))+as.numeric(format(start_time,'%M'))/60,
+    group_time = ifelse(abs(start_hour-10)<abs(start_hour-13),"10:00","13:00"),
+    group_time = ifelse(abs(start_hour-13)>abs(start_hour-15),"15:00",group_time),
+    group_time = as.factor(group_time),
+    precipitation = factor(tp>0),
+    )
+```
+
+```{r}
+lapply(survey_sp1$name, function(x) strsplit(x,split="|",fixed = T)) %>% unlist() %>% unique()
+
+ggplot(survey_sp1, aes(x=duration, y=count_sp)) + geom_point() + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=date, y=count_sp)) + geom_point() + geom_smooth(method="gam", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=group_time, y=count_sp)) + geom_boxplot()
+ggplot(survey_sp1, aes(x=sp, y=count_sp)) + geom_point() + xlab("surface pressure (Pa)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=tcc, y=count_sp)) + geom_point() + xlab("Total cloud cover (0 - 1)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=tp, y=count_sp)) + geom_point() + xlab("Total precipitation (m/hour)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=t2m-273.15, y=count_sp)) + geom_point() + xlab("2-m Temperature (C)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=ssr, y=count_sp)) + geom_point() + xlab("Surface net solar radiation (J m**-2)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+ggplot(survey_sp1, aes(x=sqrt(u10^2 +v10^2), y=count_sp)) + geom_point() + xlab("Surface net solar radiation (J m**-2)") + geom_smooth(method="glm", method.args = list(family = "poisson"))
+```
+
+```{r}
+library(mgcv)
+library(mgcViz)
+
+
+
+mod <- gam(count_sp ~ s(doy, bs = "cc", k=12) + duration + group_time + sqrt(u10^2 + v10^2) + sp +tcc+tp+t2m+ssr+precipitation, family = poisson(), data=survey_sp1)
+
+summary(mod)
+viz <- getViz(mod)
+trt <- plot(viz, allTerms = T) +
+  l_points() +
+  l_fitLine(linetype = 1)  +
+  l_ciLine(linetype = 3) +
+  l_ciBar()
+
+print(trt, pages = 3)
+```

@@ -1,0 +1,226 @@
+---
+title: "exploratory_analysis"
+author: "Raphaël Nussbaumer"
+date: "2/26/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(DT)
+```
+
+## Load data
+
+Load the raw data from the `.xlsx` file and perform the following pre-processing steps. 
+- set time zone.
+- compute survey duration
+- eliminates surveys which were abandoned or with uncertain validity.
+
+```{r}
+# setwd('/Users/raphael/ARK/Science - Documents/03. Mwamba biodiversity/Butterflies & Moths/Survey Butterfly Mwamba')
+survey <- read_excel('../data/Butterfly_mwamba_survey.xlsx', sheet=1, 
+                     col_types = c("date","text", "numeric", "date", "date", "text", "guess","guess","guess","guess", "text", "skip", "skip")) %>%
+  mutate(
+    date = as.POSIXct(format(date), tz="africa"),
+    start_time = as.POSIXct(paste(date, format(start_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
+    end_time = as.POSIXct(paste(date, format(end_time,'%H:%M')), format="%Y-%m-%d %H:%M"),
+    duration = difftime(end_time,start_time,units ="mins"),
+    weather=str_split(weather,","),
+    survey_id = paste(format(date),format(start_time,'%H%M'),sep="_"),
+    abandoned = ifelse(is.na(abandoned),F,abandoned)
+    ) %>% 
+  filter(!(valid %in% c('error','unsure'))) %>% 
+  filter(!abandoned) %>% 
+  select(-c('valid','abandoned'))
+```
+
+## Quality control
+
+We check the data with a series of small tests.
+
+```{r}
+paste0("Earliest date: ", min(survey$date))
+paste0("Latest date: ", max(survey$date))
+paste0("Unique start date: ", paste(sort(unique(format(survey$start_time,"%H:%M"))), collapse = ', '))
+"Following list need to be empty: "
+survey %>% group_by(survey_id) %>% filter(n_distinct(start_time)>1) %>% .$survey_id %>% unique()
+survey %>% group_by(survey_id) %>% filter(n_distinct(end_time)>1) %>% .$survey_id %>% unique()
+survey %>% group_by(survey_id) %>% filter(n_distinct(weather)>1) %>% .$survey_id %>% unique()
+survey %>% group_by(survey_id) %>% filter(n_distinct(duration)>1) %>% .$survey_id %>% unique()
+survey %>% group_by(survey_id) %>% filter(n_distinct(name)<3) %>% .$survey_id %>% unique()
+survey %>% filter(duration<15) %>% .$survey_id %>% unique()
+survey %>% filter(duration>80) %>% .$survey_id %>% unique()
+paste0("Shortest survey: ", min(survey$duration))
+paste0("Longest survey: ", max(survey$duration))
+```
+
+## Link Species list
+
+Check with the rgbif package for the species name. This data was then paste on the xlsx spreadsheet, so not needed anymore. 
+
+```{r, eval=F}
+library(rgbif)
+survey$name %>% unique() %>% lapply(species.list, function(x)  name_backbone(x)) %>% bind_rows()
+```
+
+```{r}
+species.list <- read_excel('../data/Butterfly_mwamba_survey.xlsx', sheet=2)
+survey <- survey %>% left_join(species.list, by="name")
+
+species.list %>% datatable()
+```
+
+## Add weather variable
+
+```{r}
+unique(unlist(survey$weather))
+```
+
+```{r, eval=F}
+Sys.setenv( cds.key="")
+Sys.setenv( cds.user="")
+library(ecmwfr)
+library(ncdf4)
+cds.key <- Sys.getenv('cds.key')
+cds.user <- Sys.getenv('cds.user')
+wf_set_key(user = cds.user, key = cds.key, service = "cds")
+
+request <- list(
+    dataset_short_name = "reanalysis-era5-single-levels",
+    product_type   = "reanalysis",
+    format = "netcdf",
+    variable = c('10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature', 'surface_net_solar_radiation', 'surface_pressure', 'total_cloud_cover', 'total_precipitation'),
+    year = c(2020,2021),
+    month = seq(1,12),
+    day = seq(1,31),
+    time = c('06:00', '07:00', '10:00','11:00', '12:00', '13:00','14:00'),
+    # area is specified as N, W, S, E
+    area = c(-3.378178,39.988888,-3.378178,39.988888)
+  )
+
+wf_request(user = cds.user, request = request, path = "~")
+
+nc_data <- nc_open("~/adaptor.mars.internal-1649292123.5901017-17263-8-c3ac7799-2eb2-40de-9705-d8fb08fe8303.nc")
+data.frame(
+  time = as.POSIXct(ncvar_get(nc_data, "time")*60*60, origin = "1900-01-01", tz = "UTC"),
+  latitude = ncvar_get(nc_data, "latitude"),
+  longitude = ncvar_get(nc_data, "longitude"),
+  u10 = ncvar_get(nc_data, "u10"),
+  v10 = ncvar_get(nc_data, "v10"),
+  t2m = ncvar_get(nc_data, "t2m"),
+  ssr = ncvar_get(nc_data, "ssr"),
+  sp = ncvar_get(nc_data, "sp"),
+  tcc = ncvar_get(nc_data, "tcc"),
+  tp = ncvar_get(nc_data, "tp")
+) %>% write.csv("data/ERA5.csv",row.names = F)
+
+```
+
+## Export in Darwin format
+
+### Event
+
+```{r}
+survey_evt <- survey %>% 
+  group_by(survey_id) %>% 
+  summarise(date=first(date),
+            start_time = first(start_time),
+            end_time = first(end_time),
+            weather = first(weather), 
+            #note = paste(first(abandoned), first(ill), first(nature_tail_only)),
+            .groups="drop",
+  )
+
+era5 <- read_csv("../data/ERA5.csv")
+
+survey_evt <- survey_evt %>% mutate(
+  u10 = (approx(era5$time, era5$u10, xout = start_time)[[2]] + approx(era5$time, era5$u10, end_time)[[2]]) / 2,
+  v10 = (approx(era5$time, era5$v10, xout = start_time)[[2]] + approx(era5$time, era5$v10, end_time)[[2]]) / 2,
+  sp = (approx(era5$time, era5$sp, xout = start_time)[[2]] + approx(era5$time, era5$sp, end_time)[[2]]) / 2,
+  tcc = (approx(era5$time, era5$tcc, xout = start_time)[[2]] + approx(era5$time, era5$tcc, end_time)[[2]]) / 2,
+  tp = (approx(era5$time, era5$tp, xout = start_time)[[2]] + approx(era5$time, era5$tp, end_time)[[2]]) / 2,
+  t2m = (approx(era5$time, era5$t2m, xout = start_time)[[2]] + approx(era5$time, era5$t2m, end_time)[[2]]) / 2,
+  ssr = (approx(era5$time, era5$ssr, xout = start_time)[[2]] + approx(era5$time, era5$ssr, end_time)[[2]]) / 2,
+)
+events <- survey_evt %>% 
+  transmute(
+    type = "Event",
+    language = "en",
+    license = "http://creativecommons.org/publicdomain/zero/1.0/legalcode",
+    rightsHolder = "A Rocha Kenya",
+    ownerInstitutionCode = "ARK",
+    eventID = survey_id,
+    samplingProtocol = 'transect count',
+    sampleSizeValue = difftime(end_time, start_time, units = "min"),
+    sampleSizeUnit = "minutes",
+    # samplingEffort = coverage,
+    # sampleSizeValue = if_else(site=="Sabaki",3.40,6.06),
+    # sampleSizeUnit = "square kilometre",
+    eventDate = format(date,"%Y-%m-%d"),
+    eventTime = paste0(format(start_time,"%H:%M"),"/",format(end_time,"%H:%M")),
+    # eventRemarks = "",
+    #locationID = if_else(site=='Sabaki', "sabaki", "mida"),
+    continent = "Africa",
+    country = "Kenya",
+    countryCode = "KE",
+    county = "Kilifi",
+    locality = "Watamu",
+    #locationRemarks = description,
+    decimalLatitude = -3.378178,
+    decimalLongitude = 39.988888,
+    # geodeticDatum ="WGS84",
+    # footprintWKT = if_else(site=='Sabaki',"POLYGON ((40.1294906 -3.1562848,40.1303489 -3.1575917,40.1319797 -3.1595199,40.1333959 -3.1615125,40.1339323 -3.1633336,40.1359064 -3.1646619,40.1394469 -3.1666116,40.1413138 -3.1699325,40.1402194 -3.1725249,40.1405198 -3.1751601,40.1439531 -3.1781381,40.1459272 -3.1762956,40.1484377 -3.1710251,40.1524717 -3.1611482,40.1489527 -3.1582987,40.1466567 -3.158063,40.1454121 -3.1573882,40.1424188 -3.1545065,40.1388891 -3.1541208,40.1349408 -3.1522033,40.1327843 -3.1529264,40.1335032 -3.1564669,40.1344044 -3.1583844,40.133825 -3.1588772,40.132838 -3.1575274,40.1310784 -3.1552563,40.1294906 -3.1562848))", "POLYGON ((39.9635702 -3.3292204,39.9630981 -3.3312768,39.9632269 -3.333419,39.9617249 -3.3379175,39.9663168 -3.3422017,39.971767 -3.3402738,39.976123 -3.3452649,39.9780434 -3.349517,39.9885738 -3.3435459,39.9846846 -3.3381745,39.9832683 -3.3340188,39.9831825 -3.3328192,39.9836975 -3.3319195,39.9850279 -3.3301201,39.9862724 -3.3288776,39.9878603 -3.3264784,39.9900919 -3.324422,39.9880749 -3.3208231,39.9842983 -3.320866,39.9815517 -3.321123,39.9787622 -3.3212516,39.975844 -3.3218514,39.9724966 -3.3228796,39.9697929 -3.3240364,39.9676901 -3.3256216,39.9654585 -3.3266498,39.9644714 -3.3272068,39.9638277 -3.3283635,39.9635702 -3.3292204))"),
+    #georeferencedBy = "Raphaël Nussbaumer",
+    #georeferencedDate = "03/06/2020",
+    #georeferenceSources = "https://www.geonames.org/ | https://www.google.co.ke/maps/",
+    #georeferenceVerificationStatus = "verified by curator",
+    #georeferenceRemarks = "",
+    dynamicProperties = paste0("{",
+      'weather: "',weather,'", ',
+      'u10: "',u10,'", ',
+      'v10: "',v10,'", ',
+      'sp: "',sp,'", ',
+      'tcc: "',tcc,'", ',
+      'tp: "',tp,'", ',
+      #'note: "', ifelse(is.na(ill),"","ill") ,'", ',
+      "}"
+    ),
+    )
+
+events %>% datatable()
+```
+
+### Occurence
+```{r}
+occurences <- survey %>% 
+  transmute(
+    basisOfRecord = "HumanObservation",
+    eventID = survey_id,
+    occurrenceID = paste(eventID, usageKey,sep="_"),
+    individualCount = count,
+    # organismQuantity = count,
+    # organismQuantityType = "individu",
+    # occurrenceStatus = "present",
+    taxonID = usageKey,
+    scientificName = name,
+    kingdom = "Animalia",
+    phylum = "Arthropoda",
+    order = "Lepidoptera",
+    taxonRank = Taxon,
+    scientificNameAuthorship = Author,
+    occurrenceRemarks = note,
+      )
+
+occurences %>% head() %>%  datatable()
+```
+### Write csv file
+```{r}
+write.csv(events, file = "../data/events.csv", 
+          na = "", row.names = FALSE, fileEncoding = "UTF-8")
+
+write.csv(occurences, file = "../data/occurences.csv", 
+          na = "", row.names = FALSE, fileEncoding = "UTF-8")
+```
